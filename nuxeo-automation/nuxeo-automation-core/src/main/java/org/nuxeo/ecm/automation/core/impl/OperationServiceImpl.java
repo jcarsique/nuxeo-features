@@ -1,15 +1,20 @@
 /*
- * Copyright (c) 2006-2011 Nuxeo SA (http://nuxeo.com/) and others.
+ * (C) Copyright 2013 Nuxeo SA (http://nuxeo.com/) and contributors.
  *
  * All rights reserved. This program and the accompanying materials
- * are made available under the terms of the Eclipse Public License v1.0
- * which accompanies this distribution, and is available at
- * http://www.eclipse.org/legal/epl-v10.html
+ * are made available under the terms of the GNU Lesser General Public License
+ * (LGPL) version 2.1 which accompanies this distribution, and is available at
+ * http://www.gnu.org/licenses/lgpl.html
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Lesser General Public License for more details.
  *
  * Contributors:
  *     bstefanescu
- *     vpasquier
- *     slacoin
+ *     vpasquier <vpasquier@nuxeo.com>
+ *     slacoin <slacoin@nuxeo.com>
  */
 package org.nuxeo.ecm.automation.core.impl;
 
@@ -26,6 +31,7 @@ import org.nuxeo.ecm.automation.AdapterNotFoundException;
 import org.nuxeo.ecm.automation.AutomationService;
 import org.nuxeo.ecm.automation.CompiledChain;
 import org.nuxeo.ecm.automation.InvalidChainException;
+import org.nuxeo.ecm.automation.OperationCallback;
 import org.nuxeo.ecm.automation.OperationChain;
 import org.nuxeo.ecm.automation.OperationContext;
 import org.nuxeo.ecm.automation.OperationDocumentation;
@@ -35,6 +41,9 @@ import org.nuxeo.ecm.automation.OperationParameters;
 import org.nuxeo.ecm.automation.OperationType;
 import org.nuxeo.ecm.automation.TypeAdapter;
 import org.nuxeo.ecm.automation.core.Constants;
+import org.nuxeo.ecm.automation.core.trace.Tracer;
+import org.nuxeo.ecm.automation.core.trace.TracerFactory;
+import org.nuxeo.runtime.api.Framework;
 
 /**
  * The operation registry is thread safe and optimized for modifications at
@@ -59,6 +68,7 @@ public class OperationServiceImpl implements AutomationService {
     }
 
     @Override
+    // TODO introspect to see if operationType is chain or operation
     public Object run(OperationContext ctx, String chainId) throws Exception {
         ChainTypeImpl chain = (ChainTypeImpl) getOperation(chainId);
         return run(ctx, chain, chain.getChainParameters());
@@ -95,6 +105,7 @@ public class OperationServiceImpl implements AutomationService {
      */
     public Object run(OperationContext ctx, OperationType operationType,
             Map<String, Object> params) throws Exception {
+        final OperationCallback callback = ctx.getChainCallback();
         CompiledChainImpl chain;
         if (params == null) {
             params = new HashMap<String, Object>();
@@ -104,10 +115,13 @@ public class OperationServiceImpl implements AutomationService {
         if (params != null && !params.isEmpty()) {
             ctx.put(Constants.VAR_RUNTIME_CHAIN, params);
         }
+        Tracer tracer = Framework.getLocalService(TracerFactory.class).newTracer();
+        ctx.addChainCallback(tracer);
         try {
             Object input = ctx.getInput();
             Class<?> inputType = input == null ? Void.TYPE : input.getClass();
             if (ChainTypeImpl.class.isAssignableFrom(operationType.getClass())) {
+                callback.onChain(ctx,operationType);
                 chain = compiledChains.get(operationType.getId());
                 if (chain == null) {
                     chain = (CompiledChainImpl) operationType.newInstance(ctx,
@@ -123,11 +137,20 @@ public class OperationServiceImpl implements AutomationService {
                         toParams(operationType.getId()));
             }
             Object ret = chain.invoke(ctx);
+            callback.onOutput(ret);
             if (ctx.getCoreSession() != null && ctx.isCommit()) {
                 // auto save session if any
                 ctx.getCoreSession().save();
             }
             return ret;
+        } catch (OperationException oe) {
+            if (oe.isRollback()) {
+                ctx.setRollback();
+            }
+            callback.onError(oe);
+            TracerFactory traceFactory = Framework.getLocalService(TracerFactory.class);
+            throw new OperationException(traceFactory.getTrace(
+                    operationType.getId()).getFormattedText());
         } finally {
             ctx.dispose();
         }
@@ -335,15 +358,16 @@ public class OperationServiceImpl implements AutomationService {
                 ObjectMapper mapper = new ObjectMapper();
                 return (T) mapper.convertValue(toAdapt, targetType);
             }
-            throw new AdapterNotFoundException(
+            throw new OperationException(
                     "No type adapter found for input: " + toAdapt.getClass()
-                            + " and output " + targetType, ctx);
+                            + " and output " + targetType);
         }
         return (T) adapter.getAdaptedValue(ctx, toAdapt);
     }
 
     @Override
-    public List<OperationDocumentation> getDocumentation() throws OperationException {
+    public List<OperationDocumentation> getDocumentation()
+            throws OperationException {
         List<OperationDocumentation> result = new ArrayList<OperationDocumentation>();
         Collection<OperationType> ops = operations.lookup().values();
         for (OperationType ot : ops.toArray(new OperationType[ops.size()])) {
