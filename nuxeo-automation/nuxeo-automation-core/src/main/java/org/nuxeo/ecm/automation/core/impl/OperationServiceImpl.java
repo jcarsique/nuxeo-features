@@ -67,7 +67,6 @@ public class OperationServiceImpl implements AutomationService {
     }
 
     @Override
-    // TODO introspect to see if operationType is chain or operation
     public Object run(OperationContext ctx, String chainId) throws Exception {
         ChainTypeImpl chain = (ChainTypeImpl) getOperation(chainId);
         return run(ctx, chain, chain.getChainParameters());
