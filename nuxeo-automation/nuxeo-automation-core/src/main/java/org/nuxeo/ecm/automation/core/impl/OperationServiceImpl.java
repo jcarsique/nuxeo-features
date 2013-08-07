@@ -22,8 +22,10 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -107,6 +109,7 @@ public class OperationServiceImpl implements AutomationService {
      */
     public Object run(OperationContext ctx, OperationType operationType,
             Map<String, Object> params) throws Exception {
+        Boolean mainChain = true;
         CompiledChainImpl chain;
         if (params == null) {
             params = new HashMap<String, Object>();
@@ -116,14 +119,20 @@ public class OperationServiceImpl implements AutomationService {
         if (params != null && !params.isEmpty()) {
             ctx.put(Constants.VAR_RUNTIME_CHAIN, params);
         }
-        OperationCallback tracer = Framework.getLocalService(
-                TracerFactory.class).newTracer();
-        ctx.addChainCallback(tracer);
+        OperationCallback tracer = null;
+        if (ctx.getChainCallback() == null) {
+            tracer = Framework.getLocalService(TracerFactory.class).newTracer();
+            ctx.addChainCallback(tracer);
+        } else {
+            // Not logging at output if success for a child chain
+            mainChain = false;
+            tracer = ctx.getChainCallback();
+        }
         try {
             Object input = ctx.getInput();
             Class<?> inputType = input == null ? Void.TYPE : input.getClass();
             if (ChainTypeImpl.class.isAssignableFrom(operationType.getClass())) {
-                tracer.onChain(ctx, operationType);
+                tracer.onChain(operationType);
                 chain = compiledChains.get(operationType.getId());
                 if (chain == null) {
                     chain = (CompiledChainImpl) operationType.newInstance(ctx,
@@ -144,14 +153,21 @@ public class OperationServiceImpl implements AutomationService {
                 // auto save session if any
                 ctx.getCoreSession().save();
             }
-            log.info(tracer.getFormattedText());
+            // Log at the end of the main chain execution
+            if (mainChain) {
+                log.info(tracer.getFormattedText());
+            }
             return ret;
         } catch (OperationException oe) {
             if (oe.isRollback()) {
                 ctx.setRollback();
             }
             tracer.onError(oe);
-            throw new TraceException(tracer, oe);
+            if (mainChain) {
+                throw new TraceException(tracer, oe);
+            } else {
+                throw new TraceException(oe);
+            }
         } finally {
             ctx.dispose();
         }
